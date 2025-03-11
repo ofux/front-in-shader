@@ -6,48 +6,123 @@ const vsSource = `
     }
 `;
 
-// Fragment shader program - Mandelbrot Set with smooth coloring
+// Fragment shader program - 3D Terrain with Perlin Noise
 const fsSource = `
     precision highp float;
     uniform vec2 uResolution;
     uniform float uTime;
 
-    vec3 hsv2rgb(vec3 c) {
-        vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    // Noise functions from Inigo Quilez
+    vec3 hash(vec3 p) {
+        p = vec3(dot(p,vec3(127.1,311.7, 74.7)),
+                 dot(p,vec3(269.5,183.3,246.1)),
+                 dot(p,vec3(113.5,271.9,124.6)));
+        return -1.0 + 2.0*fract(sin(p)*43758.5453123);
+    }
+
+    float noise(vec3 p) {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        vec3 u = f*f*(3.0-2.0*f);
+
+        return mix(mix(mix(dot(hash(i + vec3(0.0,0.0,0.0)), f - vec3(0.0,0.0,0.0)),
+                         dot(hash(i + vec3(1.0,0.0,0.0)), f - vec3(1.0,0.0,0.0)), u.x),
+                     mix(dot(hash(i + vec3(0.0,1.0,0.0)), f - vec3(0.0,1.0,0.0)),
+                         dot(hash(i + vec3(1.0,1.0,0.0)), f - vec3(1.0,1.0,0.0)), u.x), u.y),
+                 mix(mix(dot(hash(i + vec3(0.0,0.0,1.0)), f - vec3(0.0,0.0,1.0)),
+                         dot(hash(i + vec3(1.0,0.0,1.0)), f - vec3(1.0,0.0,1.0)), u.x),
+                     mix(dot(hash(i + vec3(0.0,1.0,1.0)), f - vec3(0.0,1.0,1.0)),
+                         dot(hash(i + vec3(1.0,1.0,1.0)), f - vec3(1.0,1.0,1.0)), u.x), u.y), u.z);
+    }
+
+    float fbm(vec3 p) {
+        float value = 0.0;
+        float amplitude = 0.5;
+        float frequency = 1.0;
+        for(int i = 0; i < 6; i++) {
+            value += amplitude * noise(p * frequency);
+            amplitude *= 0.5;
+            frequency *= 2.0;
+        }
+        return value;
+    }
+
+    vec3 calcNormal(vec3 p, float t) {
+        vec2 e = vec2(0.01, 0.0);
+        float h = fbm(p);
+        vec3 n = vec3(
+            fbm(p + vec3(e.x, 0.0, 0.0)) - h,
+            e.x,
+            fbm(p + vec3(0.0, 0.0, e.x)) - h
+        );
+        return normalize(n);
     }
 
     void main() {
-        vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution) / min(uResolution.x, uResolution.y);
+        vec2 uv = (gl_FragCoord.xy * 2.0 - uResolution.xy) / min(uResolution.x, uResolution.y);
         
-        // Scale and translate the view
-        uv *= 2.0;
-        uv += vec2(-0.5, 0.0);
+        // Camera setup - Adjusted for better view
+        vec3 ro = vec3(0.0, 4.0, -6.0); // Moved camera higher and further back
+        vec3 lookAt = vec3(0.0, 0.0, 0.0); // Looking at the center
+        vec3 forward = normalize(lookAt - ro);
+        vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), forward));
+        vec3 up = cross(forward, right);
+        vec3 rd = normalize(forward + right * uv.x + up * uv.y);
         
-        vec2 c = uv;
-        vec2 z = vec2(0.0);
-        float iter = 0.0;
-        const float MAX_ITER = 100.0;
+        // Rotate camera
+        float angle = uTime * 0.2;
+        mat3 rot = mat3(
+            cos(angle), 0.0, -sin(angle),
+            0.0, 1.0, 0.0,
+            sin(angle), 0.0, cos(angle)
+        );
+        ro *= rot;
+        rd *= rot;
+
+        // Ray marching
+        float t = 0.0;
+        float tmax = 20.0;
+        float h = 0.0;
+        vec3 p;
         
-        for(float i = 0.0; i < MAX_ITER; i++) {
-            z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
-            if(dot(z, z) > 4.0) break;
-            iter++;
+        for(int i = 0; i < 128; i++) {
+            p = ro + rd * t;
+            h = p.y - fbm(p * 0.5) * 1.0;
+            if(abs(h) < 0.01 || t > tmax) break;
+            t += h * 0.5;
         }
         
-        if(iter >= MAX_ITER) {
-            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        vec3 col;
+        
+        if(t < tmax) {
+            // Calculate normal and lighting
+            vec3 normal = calcNormal(p * 0.5, t);
+            vec3 light = normalize(vec3(1.0, 1.0, -1.0));
+            
+            // Base color based on height
+            vec3 baseColor = mix(
+                vec3(0.2, 0.3, 0.1), // Valley color
+                vec3(0.8, 0.8, 0.8), // Peak color
+                smoothstep(-0.5, 1.0, p.y)
+            );
+            
+            // Lighting calculation
+            float diff = max(dot(normal, light), 0.0);
+            float amb = 0.2;
+            
+            col = baseColor * (diff + amb);
+            
+            // Add fog
+            col = mix(col, vec3(0.6, 0.7, 0.8), 1.0 - exp(-0.1 * t));
         } else {
-            // Smooth coloring
-            float smoothed = iter + 1.0 - log(log(length(z))) / log(2.0);
-            vec3 color = hsv2rgb(vec3(
-                0.95 + 0.012 * smoothed + uTime * 0.1,
-                0.9,
-                1.0
-            ));
-            gl_FragColor = vec4(color, 1.0);
+            // Sky color
+            col = vec3(0.6, 0.7, 0.8);
         }
+        
+        // Gamma correction
+        col = pow(col, vec3(0.4545));
+        
+        gl_FragColor = vec4(col, 1.0);
     }
 `;
 
